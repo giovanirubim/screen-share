@@ -28,7 +28,19 @@ the same VP8/Opus packets to each viewer over one UDP port. Only localhost can b
 
 ## Build
 
+With Go installed:
+
 ```
 go build -ldflags "-s -w" -o screen-share.exe .
-go test ./...
 ```
+
+Without Go (PowerShell, from the repo folder; Go is downloaded into `.go\` and nothing is installed):
+
+```powershell
+$v = (Invoke-RestMethod 'https://go.dev/dl/?mode=json')[0].version
+Invoke-WebRequest "https://go.dev/dl/$v.windows-amd64.zip" -OutFile go.zip
+tar -xf go.zip; Rename-Item go .go; Remove-Item go.zip
+.\.go\bin\go.exe build -ldflags "-s -w" -o screen-share.exe .
+```
+
+Run tests with `go test ./...`.
