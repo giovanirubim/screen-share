@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Broadcast your screen</title>
+<style>
+  :root { color-scheme: dark; --bg:#111318; --panel:#1b1e25; --line:#2b2f39; --text:#e6e8ee; --muted:#9aa0ad; --accent:#4f8cff; --live:#ff4757; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .controls { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:end; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+  label.check { flex-direction:row; align-items:center; gap:6px; color:var(--text); }
+  select, button { font:inherit; color:var(--text); background:#252933; border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; padding:8px 18px; }
+  button.danger { background:var(--live); border-color:var(--live); color:#fff; font-weight:600; padding:8px 18px; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { display:flex; align-items:center; gap:8px; font-weight:600; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--muted); }
+  .dot.live { background:var(--live); box-shadow:0 0 8px var(--live); }
+  video { width:100%; background:#000; border-radius:8px; display:block; margin-top:12px; max-height:50vh; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { display:flex; gap:10px; align-items:center; padding:6px 0; border-top:1px solid var(--line); flex-wrap:wrap; }
+  li:first-child { border-top:0; }
+  code { font-size:14px; word-break:break-all; flex:1; min-width:200px; }
+  .note { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Broadcast your screen</h1>
+
+  <div class="panel">
+    <div class="controls">
+      <label>Quality
+        <select id="bitrate">
+          <option value="1500000">Low (1.5 Mbps)</option>
+          <option value="3000000" selected>Medium (3 Mbps)</option>
+          <option value="6000000">High (6 Mbps)</option>
+          <option value="10000000">Very high (10 Mbps)</option>
+        </select>
+      </label>
+      <label>Frame rate
+        <select id="fps"><option>15</option><option selected>30</option><option>60</option></select>
+      </label>
+      <label>Optimize for
+        <select id="hint">
+          <option value="detail">Text and detail</option>
+          <option value="motion">Motion and video</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="audio" checked> Share audio</label>
+      <button id="start" class="primary">Start sharing</button>
+      <button id="stop" class="danger" hidden>Stop</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div id="status"><span class="dot" id="dot"></span><span id="statusText">Not sharing</span></div>
+    <video id="preview" muted autoplay playsinline hidden></video>
+  </div>
+
+  <div class="panel">
+    <h2>Send viewers one of these links</h2>
+    <ul id="links"></ul>
+    <p class="note">Each viewer receives the full stream, so your upload speed limits how many people can watch.
+      Example: at 3 Mbps, a 30 Mbps upload supports about 9 viewers.</p>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let pc = null, stream = null, poll = null;
+
+function setStatus(text, live) {
+  $('statusText').textContent = text;
+  $('dot').classList.toggle('live', !!live);
+}
+
+function iceGathered(pc, timeoutMs) {
+  return new Promise(resolve => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const t = setTimeout(resolve, timeoutMs);
+    pc.addEventListener('icegatheringstatechange', () => {
+      if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
+    });
+  });
+}
+
+async function start() {
+  $('start').disabled = true;
+  const fps = +$('fps').value;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: fps, max: fps } },
+      audio: $('audio').checked,
+    });
+  } catch (e) {
+    setStatus('Screen selection was cancelled');
+    $('start').disabled = false;
+    return;
+  }
+  const [videoTrack] = stream.getVideoTracks();
+  videoTrack.contentHint = $('hint').value;
+  videoTrack.addEventListener('ended', stop); // browser's own "Stop sharing" button
+  $('preview').srcObject = stream;
+  $('preview').hidden = false;
+
+  try {
+    setStatus('Connecting…');
+    pc = new RTCPeerConnection();
+    pc.addTransceiver(videoTrack, {
+      direction: 'sendonly',
+      streams: [stream],
+      sendEncodings: [{ maxBitrate: +$('bitrate').value, maxFramerate: fps }],
+    });
+    for (const t of stream.getAudioTracks()) {
+      pc.addTransceiver(t, { direction: 'sendonly', streams: [stream] });
+    }
+    pc.addEventListener('connectionstatechange', () => {
+      if (!pc) return;
+      if (pc.connectionState === 'connected') refreshCount();
+      if (pc.connectionState === 'failed') { stop(); setStatus('Connection to the server failed'); }
+    });
+    await pc.setLocalDescription(await pc.createOffer());
+    await iceGathered(pc, 2000);
+    const res = await fetch('/api/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pc.localDescription),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await pc.setRemoteDescription(await res.json());
+  } catch (e) {
+    stop();
+    setStatus('Could not start: ' + e.message);
+    return;
+  }
+  $('start').hidden = true;
+  $('stop').hidden = false;
+  poll = setInterval(refreshCount, 2000);
+}
+
+async function refreshCount() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    if (pc && s.live) setStatus(`Live: ${s.viewers} viewer${s.viewers === 1 ? '' : 's'}`, true);
+  } catch {}
+}
+
+function stop() {
+  clearInterval(poll);
+  if (pc) { pc.close(); pc = null; fetch('/api/unpublish', { method: 'POST' }).catch(() => {}); }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  $('preview').hidden = true;
+  $('preview').srcObject = null;
+  $('start').hidden = false;
+  $('start').disabled = false;
+  $('stop').hidden = true;
+  setStatus('Not sharing');
+}
+
+async function loadLinks() {
+  const { links } = await (await fetch('/api/info')).json();
+  const ul = $('links');
+  if (!links || !links.length) { ul.innerHTML = '<li class="note">No network addresses found.</li>'; return; }
+  for (const l of links) {
+    const li = document.createElement('li');
+    const code = document.createElement('code'); code.textContent = l.url;
+    const note = document.createElement('span'); note.className = 'note'; note.textContent = l.note;
+    const btn = document.createElement('button'); btn.textContent = 'Copy';
+    btn.onclick = async () => {
+      try { await navigator.clipboard.writeText(l.url); btn.textContent = 'Copied'; }
+      catch { btn.textContent = 'Copy failed'; }
+      setTimeout(() => btn.textContent = 'Copy', 1500);
+    };
+    li.append(code, note, btn);
+    ul.append(li);
+  }
+}
+
+$('start').onclick = start;
+$('stop').onclick = stop;
+window.addEventListener('pagehide', () => { if (pc) navigator.sendBeacon('/api/unpublish'); });
+loadLinks();
+</script>
+</body>
+</html>

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live screen</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:#000; color:#e6e8ee; font:15px/1.5 system-ui, sans-serif; overflow:hidden; }
+  video { width:100%; height:100%; object-fit:contain; display:block; background:#000; }
+  #overlay { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; text-align:center; padding:16px; background:#111318; }
+  #overlay[hidden] { display:none; }
+  .spinner { width:28px; height:28px; border:3px solid #2b2f39; border-top-color:#4f8cff; border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #bar { position:fixed; right:12px; bottom:12px; display:flex; gap:8px; opacity:0; transition:opacity .2s; }
+  body:hover #bar, #bar.show { opacity:1; }
+  #bar button { font:inherit; color:#fff; background:rgba(20,22,28,.8); border:1px solid #3a3f4b; border-radius:6px; padding:6px 12px; cursor:pointer; }
+  #live { position:fixed; left:12px; top:12px; background:#ff4757; color:#fff; font-weight:700; font-size:12px; padding:2px 8px; border-radius:4px; letter-spacing:.05em; }
+  #live[hidden] { display:none; }
+</style>
+</head>
+<body>
+<video id="v" autoplay muted playsinline></video>
+<span id="live" hidden>LIVE</span>
+<div id="bar" class="show">
+  <button id="unmute" hidden>🔊 Unmute</button>
+  <button id="fs">⛶ Fullscreen</button>
+</div>
+<div id="overlay"><div class="spinner"></div><div id="msg">Connecting…</div></div>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('v');
+let pc = null, session = null, connecting = false, connectTimer = null;
+
+function show(msg) { $('msg').textContent = msg; $('overlay').hidden = false; $('live').hidden = true; }
+function hide() { $('overlay').hidden = true; $('live').hidden = false; }
+
+function iceGathered(pc, timeoutMs) {
+  return new Promise(resolve => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const t = setTimeout(resolve, timeoutMs);
+    pc.addEventListener('icegatheringstatechange', () => {
+      if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
+    });
+  });
+}
+
+function teardown(msg) {
+  clearTimeout(connectTimer);
+  if (pc) { pc.close(); pc = null; }
+  session = null;
+  video.srcObject = null;
+  $('unmute').hidden = true;
+  if (msg) show(msg);
+}
+
+async function connect() {
+  connecting = true;
+  const p = new RTCPeerConnection();
+  pc = p;
+  try {
+    p.addTransceiver('video', { direction: 'recvonly' });
+    p.addTransceiver('audio', { direction: 'recvonly' });
+    const ms = new MediaStream();
+    p.ontrack = e => {
+      ms.addTrack(e.track);
+      video.srcObject = ms;
+      if (e.track.kind === 'audio') $('unmute').hidden = !video.muted;
+    };
+    p.onconnectionstatechange = () => {
+      if (p !== pc) return;
+      if (p.connectionState === 'connected') { clearTimeout(connectTimer); hide(); }
+      if (p.connectionState === 'failed') teardown('Connection lost. Reconnecting…');
+    };
+    await p.setLocalDescription(await p.createOffer());
+    await iceGathered(p, 1500);
+    const res = await fetch('/api/watch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(p.localDescription),
+    });
+    if (p !== pc) return;
+    if (!res.ok) { teardown(await res.text()); return; }
+    const answer = await res.json();
+    session = answer.session;
+    await p.setRemoteDescription(answer);
+    show('Connecting to the stream…');
+    connectTimer = setTimeout(() => {
+      if (p === pc && p.connectionState !== 'connected') {
+        teardown('Could not reach the stream. Your network may not support IPv6 or a firewall may be blocking it. Retrying…');
+      }
+    }, 15000);
+  } catch (e) {
+    if (p === pc) teardown('Error: ' + e.message);
+  } finally {
+    connecting = false;
+  }
+}
+
+async function tick() {
+  try {
+    const s = await (await fetch('/api/status', { cache: 'no-store' })).json();
+    if (!s.live) {
+      if (pc) teardown();
+      show('Waiting for the broadcast to start…');
+    } else if (!pc && !connecting) {
+      connect();
+    } else if (pc && session !== null && session !== s.session) {
+      teardown('The broadcast restarted. Reconnecting…');
+      connect();
+    }
+  } catch {
+    show('Server unreachable. Retrying…');
+  }
+}
+
+$('unmute').onclick = () => { video.muted = false; video.play(); $('unmute').hidden = true; };
+$('fs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+video.ondblclick = () => $('fs').onclick();
+let hideBar;
+document.addEventListener('mousemove', () => { $('bar').classList.add('show'); clearTimeout(hideBar); hideBar = setTimeout(() => $('bar').classList.remove('show'), 2500); });
+
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
